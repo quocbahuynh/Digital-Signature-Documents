@@ -1,36 +1,39 @@
 # Digital Signature (.NET 8)
 
-A simple, modular, and secure digital signature solution in .NET 8 implementing PKCS#7 / CMS detached signatures and database public key verification.
+A high-performance, modular, and secure digital signature solution in .NET 8 implementing PKCS#7 / CMS detached signatures (`SignData` & `VerifyData`), visual signature stamping (`StampVisualSignature`), and database public key verification.
 
 ---
 
 ## Projects
 
-- **`Sign.PDF/`**: PDF digital signature engine (ISO 32000 compliant using PDFsharp).
-- **`Sign.Tests/`**: Automated xUnit test suite for digital signing and security verification.
+- **`Sign.PDF/`**: PDF visual stamping & digital signature engine.
+- **`Sign.Tests/`**: Automated xUnit test suite covering 100% of cryptography, visual stamping, thread-safety, and security paths.
 
 ---
 
-## Security Model
+## Security Model (Detached Signatures + Visual Stamping)
 
 ```text
 [CLIENT (User Machine)]                                   [SERVER + DATABASE]
          |                                                         |
 (Holds 'user_key.pfx')                                    (Stores 'dbPublicKey' in DB)
          |                                                         |
- (1) Signs PDF with Private Key                                    |
+ (1) Visual Stamp on PDF (StampVisualSignature)                    |
+ (2) Signs PDF bytes with Private Key (SignData)                   |
          |                                                         |
-         | ---- (2) Sends signed PDF to Server ------------------> |
+         | ---- (3) Sends stamped PDF + Signature to Server -----> |
          |                                                         |
-         |                                                 (3) Checks integrity (hash)
-         |                                                 (4) Extracts public key from PDF
-         |                                                 (5) Matches with Database Key
+         |                                                 (4) Checks data integrity (hash)
+         |                                                 (5) Extracts public key from signature
+         |                                                 (6) Matches with Database Key (VerifyData)
          |                                                         |
-         | <--- (6) "Signature VALID & Matches User Record" -------|
+         | <--- (7) "Signature VALID & Matches User Record" -------|
 ```
 
-1. **Private Keys:** Stored securely on the client machine in password-protected `.pfx` files or Base64 PFX strings.
+1. **Private Keys:** Stored securely on the client machine in password-protected `.pfx` byte arrays.
 2. **Public Keys:** Stored in the server database to verify signer identity and prevent forgery.
+3. **Visual Layer:** `StampVisualSignature` dynamically draws approval boxes anywhere on the PDF page.
+4. **Crypto Layer:** `SignData` generates standard 1.1 KB PKCS#7 detached signatures for lightweight multi-signer database storage.
 
 ---
 
@@ -56,41 +59,31 @@ dotnet test
 | Test Case ID | Test Function Name | Description | Expected Result |
 | :---: | :--- | :--- | :--- |
 | **`TC-PDF-01`** | `TC_PDF_01_GenerateCertificate_ShouldReturnPfxBytesAndPublicKey` | Generate certificate and return PFX byte array and public key. | Returns `pfxBytes` opening with password and valid DB public key. |
-| **`TC-PDF-02`** | `TC_PDF_02_SignAndVerify_WithMatchingDatabasePublicKey_ShouldSucceed` | Legitimate user signs PDF and server verifies with DB public key. | Returns `true` (signature valid and matches DB record). |
-| **`TC-PDF-03`** | `TC_PDF_03_Verify_WithUnauthorizedAttackerKey_ShouldFail` | Attacker signs PDF with an unauthorized keypair. | Returns `false` (key does not match database record). |
-| **`TC-PDF-04`** | `TC_PDF_04_Verify_WhenSignedDocumentIsTampered_ShouldFail` | Signed PDF content is modified after signing. | Returns `false` (cryptographic hash mismatch). |
-| **`TC-PDF-05`** | `TC_PDF_05_Verify_WhenDocumentHasNoSignature_ShouldFail` | Verify an unsigned PDF document. | Returns `false` (missing signature dictionaries). |
-| **`TC-PDF-06`** | `TC_PDF_06_SignAndVerify_WithPfxBytes_ShouldSucceed` | Legitimate user signs PDF directly with raw `byte[]` PFX key. | Returns `true` (signature valid and matches DB record). |
-| **`TC-PDF-07`** | `TC_PDF_07_SignAndVerify_WithCustomFontPath_ShouldSucceed` | Sign PDF by providing a custom font file path. | Returns `true` (custom font loaded and PDF signature verified). |
-| **`TC-PDF-08`** | `TC_PDF_08_SignAndVerify_InMemoryBytes_ShouldSucceed` | Sign and verify PDF purely in RAM using `byte[]` arrays without disk I/O. | Returns `true` (in-memory bytes signed and verified against DB key). |
-| **`TC-PDF-09`** | `TC_PDF_09_GenerateCertificate_WithSupportedKeySizes_ShouldSucceed` | Generate certificate with 1024, 2048, 3072, and 4096-bit RSA keys. | Returns `true` (valid signatures across all 4 key sizes). |
-| **`TC-PDF-10`** | `TC_PDF_10_GenerateCertificate_WithInvalidKeySize_ShouldThrowArgumentException` | Attempt to generate certificate with unsupported key sizes (e.g. 512, 1234). | Throws `ArgumentException`. |
-| **`TC-PDF-11`** | `TC_PDF_11_GenerateCertificate_WithFullX500DistinguishedName_ShouldSucceed` | Generate certificate with full enterprise X.500 Subject DN (e.g. `CN=..., OU=..., O=..., C=VN`). | Returns `true` (signed and verified against DB key). |
-| **`TC-PDF-12`** | `TC_PDF_12_GenerateCertificate_WithCustomValidityDays_ShouldSucceed` | Generate certificate with custom validity periods (e.g. 30, 365, 730 days). | Returns `true` (NotAfter expiration date matches UTC offset). |
-| **`TC-PDF-13`** | `TC_PDF_13_GenerateCertificate_WithInvalidValidityDays_ShouldThrowArgumentException` | Attempt to generate certificate with non-positive validity days (e.g. 0, -10). | Throws `ArgumentException`. |
-| **`TC-PDF-14`** | `TC_PDF_14_Sign_WithCustomPageIndexAndCoordinates_ShouldSucceed` | Sign on a custom page index (e.g. page 0) and custom rectangle coordinates. | Returns `true` (valid signature placed on custom page and position). |
-| **`TC-PDF-15`** | `TC_PDF_15_Sign_WithInvalidPageIndex_ShouldThrowArgumentOutOfRangeException` | Attempt to sign on an out-of-range page index (e.g. -1 or 999). | Throws `ArgumentOutOfRangeException`. |
-| **`TC-PDF-16`** | `TC_PDF_16_CoSigning_WithMultipleSignersInSingleCmsContainer_BothSignaturesShouldVerifySuccessfully` | Co-sign a PDF with multiple signers in a single CMS container (RFC 5652). | Returns `true` for all legitimate co-signers and `false` for unauthorized keys. |
-| **`TC-PDF-17`** | `TC_PDF_17_SetFont_WithValidFontPath_ShouldSucceed` | Register a valid custom TrueType font file path. | Executes without exception. |
-| **`TC-PDF-18`** | `TC_PDF_18_SetFont_WithNonExistentFontPath_ShouldThrowFileNotFoundException` | Attempt to register a non-existent font file path. | Throws `FileNotFoundException`. |
-| **`TC-PDF-19`** | `TC_PDF_19_SetFont_WithNullOrWhitespaceFontPath_ShouldThrowFileNotFoundException` | Attempt to register null or empty/whitespace font path. | Throws `FileNotFoundException`. |
-| **`TC-PDF-20`** | `TC_PDF_20_GenerateCertificate_WithUnicodeVietnameseSubject_ShouldSucceed` | Generate certificate with Vietnamese Unicode accents in name. | Returns `true` (signed and verified successfully). |
-| **`TC-PDF-21`** | `TC_PDF_21_GenerateCertificate_WithSpecialCharactersInPassword_ShouldSucceed` | Generate and unlock PFX using complex special-character passwords. | Returns `true` (signed and verified successfully). |
-| **`TC-PDF-22`** | `TC_PDF_22_GenerateCertificate_KeyUsageFlags_ShouldContainDigitalSignature` | Verify generated certificate X.509 Key Usage extensions. | Contains `X509KeyUsageFlags.DigitalSignature`. |
-| **`TC-PDF-23`** | `TC_PDF_23_Sign_WithWrongPfxPassword_ShouldThrowException` | Attempt to sign PDF with incorrect PFX password. | Throws `CryptographicException` / `Exception`. |
-| **`TC-PDF-24`** | `TC_PDF_24_Sign_WithCorruptedPfxBytes_ShouldThrowException` | Attempt to sign PDF with corrupted / invalid PFX byte array. | Throws `CryptographicException` / `Exception`. |
-| **`TC-PDF-25`** | `TC_PDF_25_Sign_WithCorruptedInputPdfBytes_ShouldThrowException` | Attempt to sign corrupted non-PDF byte array. | Throws `Exception`. |
-| **`TC-PDF-26`** | `TC_PDF_26_Sign_WithNonExistentCustomFontPath_ShouldThrowFileNotFoundException` | Pass non-existent font path to `Sign(..., customFontPath)`. | Throws `FileNotFoundException`. |
-| **`TC-PDF-27`** | `TC_PDF_27_Sign_WithVietnameseUnicodeReasonAndLocation_ShouldSucceed` | Sign PDF with Vietnamese Unicode reason and location text. | Returns `true` (signature verified successfully). |
-| **`TC-PDF-28`** | `TC_PDF_28_Sign_OnMultiPagePdf_WithSpecificPageIndices_ShouldSucceed` | Sign on an intermediate page (e.g. Page 1 of 3) in a multi-page PDF. | Returns `true` (signature verified successfully). |
-| **`TC-PDF-29`** | `TC_PDF_29_Verify_WithEmptyOrCorruptedSignedPdfBytes_ShouldReturnFalse` | Verify empty or corrupted byte arrays as signed PDF. | Returns `false`. |
-| **`TC-PDF-30`** | `TC_PDF_30_Verify_WithEmptyOrMismatchedPublicKeyBytes_ShouldReturnFalse` | Verify signed PDF with empty or mismatched public key. | Returns `false`. |
-| **`TC-PDF-31`** | `TC_PDF_31_Verify_WhenSignatureContentsBlockIsTampered_ShouldReturnFalse` | Tamper with the cryptographic hex signature in `/Contents`. | Returns `false`. |
-| **`TC-PDF-32`** | `TC_PDF_32_Verify_WithNonPdfGarbageBytes_ShouldReturnFalse` | Verify arbitrary plain text or binary garbage against public key. | Returns `false`. |
-| **`TC-PDF-33`** | `TC_PDF_33_Verify_ConcurrentMultiThreaded_ShouldAllSucceed` | Concurrently verify a signed PDF across 30 simultaneous worker threads. | Returns `true` across all 30 parallel threads. |
-| **`TC-PDF-34`** | `TC_PDF_34_Verify_BatchMultiplePublicKeys_ShouldCorrectlyIdentifyMatchingKey` | Batch test a signed PDF against 1 legitimate key and 4 impostor public keys. | Returns `true` only for the matching key and `false` for all 4 impostors. |
-| **`TC-PDF-35`** | `TC_PDF_35_SignDataAndVerifyData_SequentialWorkflow_BothSignersShouldVerifySuccessfully` | Sequential detached digital signatures (`SignData` & `VerifyData`) across separate signers and timestamps. | Returns `true` for all legitimate detached signers, `false` for attackers and tampered documents. |
-| **`TC-PDF-36`** | `TC_PDF_36_StampVisualSignature_SequentialWorkflow_ProducesValidVisibleSignaturesAndPassesVerification` | Stamp visible signature boxes sequentially on PDF (`StampVisualSignature`) combined with detached crypto verification. | Returns `true` for both visible rendering and detached verification. |
+| **`TC-PDF-02`** | `TC_PDF_02_GenerateCertificate_WithAllowedKeySizes_ShouldSucceed` | Test RSA key sizes: 1024, 2048, 3072, and 4096 bits. | Returns valid certificates across all 4 key sizes. |
+| **`TC-PDF-03`** | `TC_PDF_03_GenerateCertificate_WithInvalidKeySize_ShouldThrowArgumentException` | Attempt to generate certificate with unsupported key sizes (e.g. 512, 1234). | Throws `ArgumentException`. |
+| **`TC-PDF-04`** | `TC_PDF_04_GenerateCertificate_WithFullDistinguishedName_ShouldPreserveSubjectDN` | Generate certificate with full enterprise X.500 Subject DN (`CN=..., OU=..., O=..., C=VN`). | Returns `true` (preserves all DN attributes). |
+| **`TC-PDF-05`** | `TC_PDF_05_GenerateCertificate_WithCustomValidityDays_ShouldMatchExpiration` | Custom validity periods (30, 365, 730 days). | Expiration date matches UTC offset. |
+| **`TC-PDF-06`** | `TC_PDF_06_GenerateCertificate_WithInvalidValidityDays_ShouldThrowArgumentException` | Non-positive validity days (0, -10). | Throws `ArgumentException`. |
+| **`TC-PDF-07`** | `TC_PDF_07_GenerateCertificate_WithUnicodeVietnameseSubject_ShouldSucceed` | Vietnamese Unicode characters in Subject Name. | Returns `true` with accents preserved. |
+| **`TC-PDF-08`** | `TC_PDF_08_GenerateCertificate_WithSpecialCharactersInPassword_ShouldSucceed` | Complex special characters in password. | Opens and signs successfully. |
+| **`TC-PDF-09`** | `TC_PDF_09_GenerateCertificate_KeyUsageFlags_ShouldContainDigitalSignature` | Verify generated certificate X.509 Key Usage extensions. | Contains `X509KeyUsageFlags.DigitalSignature`. |
+| **`TC-PDF-10`** | `TC_PDF_10_SignDataAndVerifyData_WithMatchingDatabasePublicKey_ShouldSucceed` | Generate detached signature and verify against DB public key. | Returns `true` (signature matches DB record). |
+| **`TC-PDF-11`** | `TC_PDF_11_VerifyData_WithUnauthorizedAttackerKey_ShouldFail` | Attacker attempts to verify with unauthorized key. | Returns `false`. |
+| **`TC-PDF-12`** | `TC_PDF_12_VerifyData_WhenDataIsTampered_ShouldFail` | 1 byte in document is tampered after signing. | Returns `false` (tampering detected). |
+| **`TC-PDF-13`** | `TC_PDF_13_SignData_WithWrongPfxPassword_ShouldThrowException` | Sign data with incorrect PFX password. | Throws `Exception`. |
+| **`TC-PDF-14`** | `TC_PDF_14_SignData_WithCorruptedPfxBytes_ShouldThrowException` | Sign data with corrupted PFX byte array. | Throws `Exception`. |
+| **`TC-PDF-15`** | `TC_PDF_15_VerifyData_WithEmptyOrCorruptedData_ShouldReturnFalse` | Verify empty or corrupted data. | Returns `false`. |
+| **`TC-PDF-16`** | `TC_PDF_16_VerifyData_WithEmptyOrCorruptedSignature_ShouldReturnFalse` | Verify empty or corrupted signature bytes. | Returns `false`. |
+| **`TC-PDF-17`** | `TC_PDF_17_VerifyData_WithEmptyOrCorruptedPublicKey_ShouldReturnFalse` | Verify empty or mismatched public key. | Returns `false`. |
+| **`TC-PDF-18`** | `TC_PDF_18_VerifyData_ConcurrentMultiThreaded_ShouldAllSucceed` | Concurrently verify signature across 30 simultaneous worker threads. | Returns `true` across all 30 threads. |
+| **`TC-PDF-19`** | `TC_PDF_19_VerifyData_BatchMultiplePublicKeys_ShouldCorrectlyIdentifyMatchingKey` | Batch test signature against 1 legitimate key and 4 impostor keys. | Returns `true` only for matching key. |
+| **`TC-PDF-20`** | `TC_PDF_20_StampVisualSignature_WithCustomCoordinates_ShouldSucceed` | Stamp visual signature box at custom (X, Y, Width, Height) position. | Returns stamped PDF byte array. |
+| **`TC-PDF-21`** | `TC_PDF_21_StampVisualSignature_WithInvalidPageIndex_ShouldThrowArgumentOutOfRangeException` | Stamp visual signature on out-of-range page index. | Throws `ArgumentOutOfRangeException`. |
+| **`TC-PDF-22`** | `TC_PDF_22_StampVisualSignature_WithVietnameseUnicodeText_ShouldSucceed` | Stamp visual signature with Vietnamese Unicode accents. | Renders Unicode text without error. |
+| **`TC-PDF-23`** | `TC_PDF_23_SetFont_WithValidFontPath_ShouldSucceed` | Register custom TrueType font file path. | Executes without exception. |
+| **`TC-PDF-24`** | `TC_PDF_24_SetFont_WithNonExistentFontPath_ShouldThrowFileNotFoundException` | Attempt to register non-existent font file path. | Throws `FileNotFoundException`. |
+| **`TC-PDF-25`** | `TC_PDF_25_SetFont_WithNullOrWhitespaceFontPath_ShouldThrowFileNotFoundException` | Attempt to register null/empty font path. | Throws `FileNotFoundException`. |
+| **`TC-PDF-26`** | `TC_PDF_26_HybridWorkflow_SequentialTwoSigners_BothVisualAndCryptoShouldSucceed` | Complete sequential hybrid workflow (Accountant + Director). | Returns `true` for all signers and visual output. |
 
 ---
 
@@ -152,21 +145,24 @@ public class DigitalSignatureController : ControllerBase
         });
     }
 
-    // POST /api/digitalsignature/sign-pdf
-    [HttpPost("sign-pdf")]
-    public async Task<IActionResult> SignPdf(
+    // POST /api/digitalsignature/stamp-and-sign
+    [HttpPost("stamp-and-sign")]
+    public async Task<IActionResult> StampAndSign(
         [FromForm] IFormFile pdfFile,
         [FromForm] IFormFile pfxFile,
         [FromForm] string password,
+        [FromForm] string signerName,
         [FromForm] string reason = "Approved Contract",
-        [FromForm] string location = "Ho Chi Minh City")
+        [FromForm] string location = "Ho Chi Minh City",
+        [FromForm] double? x = null,
+        [FromForm] double? y = null)
     {
         if (pdfFile == null || pfxFile == null)
         {
             return BadRequest("Both PDF document and PFX key file are required.");
         }
 
-        // Read files into memory (byte[])
+        // Read files into memory
         using var pdfMs = new MemoryStream();
         await pdfFile.CopyToAsync(pdfMs);
         byte[] inputPdfBytes = pdfMs.ToArray();
@@ -175,39 +171,52 @@ public class DigitalSignatureController : ControllerBase
         await pfxFile.CopyToAsync(pfxMs);
         byte[] pfxBytes = pfxMs.ToArray();
 
-        // Sign PDF directly in RAM
-        byte[] signedPdfBytes = PdfSigner.Sign(
-            inputPdfBytes, 
-            pfxBytes, 
-            password, 
-            reason: reason, 
-            location: location);
+        // 1. Stamp visual signature box on PDF
+        byte[] stampedPdfBytes = PdfSigner.StampVisualSignature(
+            inputPdfBytes,
+            signerName: signerName,
+            reason: reason,
+            location: location,
+            x: x,
+            y: y);
 
-        return File(signedPdfBytes, "application/pdf", $"signed_{pdfFile.FileName}");
+        // 2. Generate detached cryptographic signature (1.1 KB)
+        byte[] signatureBytes = PdfSigner.SignData(stampedPdfBytes, pfxBytes, password);
+
+        // Save signatureBytes (1.1 KB) to your Database:
+        // await _signatureDb.SaveSignatureAsync(documentId, userId, signatureBytes);
+
+        return Ok(new
+        {
+            Message = "Document stamped and signed successfully!",
+            SignatureHex = Convert.ToHexString(signatureBytes),
+            StampedPdfBase64 = Convert.ToBase64String(stampedPdfBytes)
+        });
     }
 
-    // POST /api/digitalsignature/verify-pdf
-    [HttpPost("verify-pdf")]
-    public async Task<IActionResult> VerifyPdf(
-        [FromForm] IFormFile signedPdfFile,
+    // POST /api/digitalsignature/verify-data
+    [HttpPost("verify-data")]
+    public async Task<IActionResult> VerifyData(
+        [FromForm] IFormFile pdfFile,
+        [FromForm] string signatureHex,
         [FromForm] string userId)
     {
-        if (signedPdfFile == null)
+        if (pdfFile == null || string.IsNullOrWhiteSpace(signatureHex))
         {
-            return BadRequest("Signed PDF file is required.");
+            return BadRequest("PDF file and signature hex are required.");
         }
 
         // 1. Fetch user's registered Public Key from Database
         // byte[] userPublicKey = await _userDb.GetPublicKeyAsync(userId);
         byte[] userPublicKey = ...;
 
-        // 2. Read PDF bytes into memory
         using var ms = new MemoryStream();
-        await signedPdfFile.CopyToAsync(ms);
-        byte[] signedPdfBytes = ms.ToArray();
+        await pdfFile.CopyToAsync(ms);
+        byte[] pdfBytes = ms.ToArray();
+        byte[] signatureBytes = Convert.FromHexString(signatureHex);
 
-        // 3. Verify cryptographic integrity & match against database key
-        bool isValid = PdfSigner.Verify(signedPdfBytes, userPublicKey);
+        // 2. Verify cryptographic integrity & match against database key
+        bool isValid = PdfSigner.VerifyData(pdfBytes, signatureBytes, userPublicKey);
 
         if (isValid == true)
         {
@@ -226,4 +235,3 @@ public class GenerateKeyRequest
     public string Password { get; set; } = string.Empty;
 }
 ```
-
