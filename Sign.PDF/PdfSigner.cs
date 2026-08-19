@@ -217,103 +217,63 @@ public static class PdfSigner
 
     /// <summary>
     /// SERVER-SIDE (IN-MEMORY): Verifies that the signed PDF contains a valid cryptographic signature matching the Database Public Key.
-    /// Supports multi-signature PDFs signed by multiple parties.
     /// </summary>
     public static bool Verify(byte[] signedPdfBytes, byte[] publicKeyBytes)
     {
-        string pdfText = System.Text.Encoding.ASCII.GetString(signedPdfBytes);
-
-        // Step 1: Extract all digital signature blocks (/ByteRange + /Contents)
-        List<PdfSignatureBlock> signatureBlocks = ExtractAllSignatureBlocks(signedPdfBytes, pdfText);
-        if (signatureBlocks.Count == 0)
+        try
         {
-            return false;
-        }
+            string pdfText = System.Text.Encoding.ASCII.GetString(signedPdfBytes);
 
-        // Step 2: Iterate through all signatures to find a valid match for the requested Public Key
-        foreach (PdfSignatureBlock block in signatureBlocks)
-        {
-            try
+            // Step 1: Locate active /ByteRange and /Contents in the PDF (scans from end of file)
+            Match byteRangeMatch = Regex.Match(pdfText, @"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]", RegexOptions.RightToLeft);
+            Match contentsMatch = Regex.Match(pdfText, @"/Contents\s*<([0-9A-Fa-f]+)>", RegexOptions.RightToLeft);
+
+            if (byteRangeMatch.Success == false || contentsMatch.Success == false)
             {
-                // Step 2.1: Verify cryptographic integrity (detect tampering)
-                ContentInfo contentInfo = new ContentInfo(block.SignedBytes);
-                SignedCms signedCms = new SignedCms(contentInfo, true);
-                signedCms.Decode(block.SignatureBytes);
-                signedCms.CheckSignature(true);
-
-                // Step 2.2: Extract signer certificate and public key
-                X509Certificate2? signerCert = signedCms.SignerInfos[0].Certificate;
-                if (signerCert != null)
-                {
-                    byte[] pdfPublicKey = signerCert.GetPublicKey();
-                    bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
-                    if (isMatched == true)
-                    {
-                        return true;
-                    }
-                }
+                return false;
             }
-            catch
-            {
-                // Continue checking remaining signatures if this one failed
-                continue;
-            }
-        }
 
-        return false;
-    }
-
-    /// <summary>
-    /// Helper record containing raw signed content bytes and its corresponding PKCS#7 signature bytes.
-    /// </summary>
-    private class PdfSignatureBlock
-    {
-        public byte[] SignedBytes { get; }
-        public byte[] SignatureBytes { get; }
-
-        public PdfSignatureBlock(byte[] signedBytes, byte[] signatureBytes)
-        {
-            SignedBytes = signedBytes;
-            SignatureBytes = signatureBytes;
-        }
-    }
-
-    /// <summary>
-    /// Locates all digital signatures in the PDF by pairing /ByteRange and /Contents entries.
-    /// </summary>
-    private static List<PdfSignatureBlock> ExtractAllSignatureBlocks(byte[] pdfBytes, string pdfText)
-    {
-        List<PdfSignatureBlock> signatureBlocks = new List<PdfSignatureBlock>();
-
-        MatchCollection byteRangeMatches = Regex.Matches(pdfText, @"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]");
-        MatchCollection contentsMatches = Regex.Matches(pdfText, @"/Contents\s*<([0-9A-Fa-f]+)>");
-
-        int count = Math.Min(byteRangeMatches.Count, contentsMatches.Count);
-        for (int i = 0; i < count; i++)
-        {
-            Match byteRangeMatch = byteRangeMatches[i];
-            Match contentsMatch = contentsMatches[i];
-
+            // Step 2: Parse byte offsets and lengths of the signed content
             int offset1 = int.Parse(byteRangeMatch.Groups[1].Value);
             int length1 = int.Parse(byteRangeMatch.Groups[2].Value);
             int offset2 = int.Parse(byteRangeMatch.Groups[3].Value);
             int length2 = int.Parse(byteRangeMatch.Groups[4].Value);
 
-            if (offset1 + length1 <= pdfBytes.Length && offset2 + length2 <= pdfBytes.Length)
+            if (offset1 + length1 > signedPdfBytes.Length || offset2 + length2 > signedPdfBytes.Length)
             {
-                byte[] signedBytes = new byte[length1 + length2];
-                Buffer.BlockCopy(pdfBytes, offset1, signedBytes, 0, length1);
-                Buffer.BlockCopy(pdfBytes, offset2, signedBytes, length1, length2);
-
-                string hexContent = contentsMatch.Groups[1].Value;
-                byte[] signatureBytes = Convert.FromHexString(hexContent);
-
-                PdfSignatureBlock block = new PdfSignatureBlock(signedBytes, signatureBytes);
-                signatureBlocks.Add(block);
+                return false;
             }
-        }
 
-        return signatureBlocks;
+            // Step 3: Extract the raw signed content bytes
+            byte[] signedBytes = new byte[length1 + length2];
+            Buffer.BlockCopy(signedPdfBytes, offset1, signedBytes, 0, length1);
+            Buffer.BlockCopy(signedPdfBytes, offset2, signedBytes, length1, length2);
+
+            // Step 4: Extract and decode PKCS#7 signature bytes from hexadecimal
+            string hexContent = contentsMatch.Groups[1].Value;
+            byte[] signatureBytes = Convert.FromHexString(hexContent);
+
+            // Step 5: Verify cryptographic integrity (detect tampering)
+            ContentInfo contentInfo = new ContentInfo(signedBytes);
+            SignedCms signedCms = new SignedCms(contentInfo, true);
+            signedCms.Decode(signatureBytes);
+            signedCms.CheckSignature(true);
+
+            // Step 6: Extract signer certificate and verify matching Database Public Key
+            X509Certificate2? signerCert = signedCms.SignerInfos[0].Certificate;
+            if (signerCert == null)
+            {
+                return false;
+            }
+
+            byte[] pdfPublicKey = signerCert.GetPublicKey();
+            bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
+            return isMatched;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // --- Private Helper Classes ---
