@@ -89,3 +89,139 @@ dotnet test
 | **`TC-PDF-32`** | `TC_PDF_32_Verify_WithNonPdfGarbageBytes_ShouldReturnFalse` | Verify arbitrary plain text or binary garbage against public key. | Returns `false`. |
 | **`TC-PDF-33`** | `TC_PDF_33_Verify_ConcurrentMultiThreaded_ShouldAllSucceed` | Concurrently verify a signed PDF across 30 simultaneous worker threads. | Returns `true` across all 30 parallel threads. |
 | **`TC-PDF-34`** | `TC_PDF_34_Verify_BatchMultiplePublicKeys_ShouldCorrectlyIdentifyMatchingKey` | Batch test a signed PDF against 1 legitimate key and 4 impostor public keys. | Returns `true` only for the matching key and `false` for all 4 impostors. |
+
+---
+
+## ASP.NET Core Web API Integration Guide
+
+`PdfSigner` is built as a **pure in-memory (`byte[]`) library** with zero disk I/O side effects, making it plug-and-play for **ASP.NET Core Web API**, microservices, and Docker containers.
+
+### 1. Install Required NuGet Packages
+
+Run in your ASP.NET Core API project directory:
+
+```bash
+dotnet add package PDFsharp --version 6.2.0-preview-1
+dotnet add package System.Security.Cryptography.Pkcs --version 8.0.0
+```
+
+### 2. Configure TrueType Font in `.csproj`
+
+Place your `Verdana.ttf` font inside a `Fonts/` folder in your Web API project, then ensure it is copied to the build output in your `.csproj`:
+
+```xml
+<ItemGroup>
+  <None Update="Fonts\**\*">
+    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+  </None>
+</ItemGroup>
+```
+
+### 3. Copy `PdfSigner.cs` & Create Controller
+
+Copy [PdfSigner.cs](file:///Users/huynhbaquoc/Desktop/Project/digital%20signature/Digital-Signature/Sign.PDF/PdfSigner.cs) into your API's `Services/` or `Common/` folder. Then create your controller:
+
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using System.IO;
+
+[ApiController]
+[Route("api/[controller]")]
+public class DigitalSignatureController : ControllerBase
+{
+    // POST /api/digitalsignature/generate-keypair
+    [HttpPost("generate-keypair")]
+    public IActionResult GenerateKeyPair([FromBody] GenerateKeyRequest request)
+    {
+        var (pfxBytes, publicKeyBytes) = PdfSigner.GenerateCertificate(
+            request.FullName, 
+            request.Password, 
+            keySizeInBits: 2048, 
+            validityInDays: 365);
+
+        // Store publicKeyBytes in your database for later verification:
+        // await _userDb.SavePublicKeyAsync(request.UserId, publicKeyBytes);
+
+        return Ok(new
+        {
+            Message = "Keypair generated successfully!",
+            PublicKeyHex = Convert.ToHexString(publicKeyBytes),
+            PfxBase64 = Convert.ToBase64String(pfxBytes)
+        });
+    }
+
+    // POST /api/digitalsignature/sign-pdf
+    [HttpPost("sign-pdf")]
+    public async Task<IActionResult> SignPdf(
+        [FromForm] IFormFile pdfFile,
+        [FromForm] IFormFile pfxFile,
+        [FromForm] string password,
+        [FromForm] string reason = "Approved Contract",
+        [FromForm] string location = "Ho Chi Minh City")
+    {
+        if (pdfFile == null || pfxFile == null)
+        {
+            return BadRequest("Both PDF document and PFX key file are required.");
+        }
+
+        // Read files into memory (byte[])
+        using var pdfMs = new MemoryStream();
+        await pdfFile.CopyToAsync(pdfMs);
+        byte[] inputPdfBytes = pdfMs.ToArray();
+
+        using var pfxMs = new MemoryStream();
+        await pfxFile.CopyToAsync(pfxMs);
+        byte[] pfxBytes = pfxMs.ToArray();
+
+        // Sign PDF directly in RAM
+        byte[] signedPdfBytes = PdfSigner.Sign(
+            inputPdfBytes, 
+            pfxBytes, 
+            password, 
+            reason: reason, 
+            location: location);
+
+        return File(signedPdfBytes, "application/pdf", $"signed_{pdfFile.FileName}");
+    }
+
+    // POST /api/digitalsignature/verify-pdf
+    [HttpPost("verify-pdf")]
+    public async Task<IActionResult> VerifyPdf(
+        [FromForm] IFormFile signedPdfFile,
+        [FromForm] string userId)
+    {
+        if (signedPdfFile == null)
+        {
+            return BadRequest("Signed PDF file is required.");
+        }
+
+        // 1. Fetch user's registered Public Key from Database
+        // byte[] userPublicKey = await _userDb.GetPublicKeyAsync(userId);
+        byte[] userPublicKey = ...;
+
+        // 2. Read PDF bytes into memory
+        using var ms = new MemoryStream();
+        await signedPdfFile.CopyToAsync(ms);
+        byte[] signedPdfBytes = ms.ToArray();
+
+        // 3. Verify cryptographic integrity & match against database key
+        bool isValid = PdfSigner.Verify(signedPdfBytes, userPublicKey);
+
+        if (isValid == true)
+        {
+            return Ok(new { IsValid = true, Message = "Document is VALID and verified against Database." });
+        }
+        else
+        {
+            return BadRequest(new { IsValid = false, Message = "Verification FAILED: Document tampered or key mismatch." });
+        }
+    }
+}
+
+public class GenerateKeyRequest
+{
+    public string FullName { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+}
+```
+
