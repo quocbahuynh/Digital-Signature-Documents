@@ -70,7 +70,7 @@ dotnet test
 | **`TC-PDF-13`** | `TC_PDF_13_GenerateCertificate_WithInvalidValidityDays_ShouldThrowArgumentException` | Attempt to generate certificate with non-positive validity days (e.g. 0, -10). | Throws `ArgumentException`. |
 | **`TC-PDF-14`** | `TC_PDF_14_Sign_WithCustomPageIndexAndCoordinates_ShouldSucceed` | Sign on a custom page index (e.g. page 0) and custom rectangle coordinates. | Returns `true` (valid signature placed on custom page and position). |
 | **`TC-PDF-15`** | `TC_PDF_15_Sign_WithInvalidPageIndex_ShouldThrowArgumentOutOfRangeException` | Attempt to sign on an out-of-range page index (e.g. -1 or 999). | Throws `ArgumentOutOfRangeException`. |
-| **`TC-PDF-16`** | `TC_PDF_16_SigningAlreadySignedPdf_ValidatesLatestSignerSuccessfully` | Re-sign an already signed PDF with a new signer key. | Returns `true` for the latest signer key and `false` for unauthorized keys. |
+| **`TC-PDF-16`** | `TC_PDF_16_CoSigning_WithMultipleSignersInSingleCmsContainer_BothSignaturesShouldVerifySuccessfully` | Co-sign a PDF with multiple signers in a single CMS container (RFC 5652). | Returns `true` for all legitimate co-signers and `false` for unauthorized keys. |
 | **`TC-PDF-17`** | `TC_PDF_17_SetFont_WithValidFontPath_ShouldSucceed` | Register a valid custom TrueType font file path. | Executes without exception. |
 | **`TC-PDF-18`** | `TC_PDF_18_SetFont_WithNonExistentFontPath_ShouldThrowFileNotFoundException` | Attempt to register a non-existent font file path. | Throws `FileNotFoundException`. |
 | **`TC-PDF-19`** | `TC_PDF_19_SetFont_WithNullOrWhitespaceFontPath_ShouldThrowFileNotFoundException` | Attempt to register null or empty/whitespace font path. | Throws `FileNotFoundException`. |

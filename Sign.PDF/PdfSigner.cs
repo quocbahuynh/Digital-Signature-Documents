@@ -109,6 +109,21 @@ public static class PdfSigner
 
 
     /// <summary>
+    /// Represents a signer credential (PFX private key bytes + password) for co-signing documents.
+    /// </summary>
+    public class PdfSignerCredential
+    {
+        public byte[] PfxBytes { get; }
+        public string Password { get; }
+
+        public PdfSignerCredential(byte[] pfxBytes, string password)
+        {
+            PfxBytes = pfxBytes;
+            Password = password;
+        }
+    }
+
+    /// <summary>
     /// CLIENT-SIDE (IN-MEMORY): Signs a PDF byte array directly in RAM using raw PFX byte array.
     /// Supports custom reason, location, font, page index (0-based, default: last page), and coordinates (X, Y, Width, Height).
     /// </summary>
@@ -125,14 +140,53 @@ public static class PdfSigner
         double? width = null,
         double? height = null)
     {
+        List<PdfSignerCredential> credentials = new List<PdfSignerCredential>
+        {
+            new PdfSignerCredential(pfxBytes, password)
+        };
+
+        return SignMulti(
+            inputPdfBytes, 
+            credentials, 
+            reason, 
+            location, 
+            customFontPath, 
+            pageIndex, 
+            x, 
+            y, 
+            width, 
+            height);
+    }
+
+    /// <summary>
+    /// CLIENT-SIDE (IN-MEMORY): Co-signs a PDF byte array with MULTIPLE signers in a single PKCS#7 / CMS container (RFC 5652).
+    /// All signers' digital signatures are cryptographically embedded and simultaneously verifiable on the document.
+    /// </summary>
+    public static byte[] SignMulti(
+        byte[] inputPdfBytes, 
+        IEnumerable<PdfSignerCredential> credentials, 
+        string reason = "Approved", 
+        string location = "Ho Chi Minh City", 
+        string? customFontPath = null,
+        int? pageIndex = null,
+        double? x = null,
+        double? y = null,
+        double? width = null,
+        double? height = null)
+    {
         // Step 1: Configure custom font if provided
         if (string.IsNullOrWhiteSpace(customFontPath) == false)
         {
             SetFont(customFontPath);
         }
 
-        // Step 2: Load and unlock the X.509 Certificate from PFX bytes using the password (cross-platform compatible)
-        X509Certificate2 userCert = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
+        // Step 2: Load and unlock all X.509 Certificates from credentials (cross-platform compatible)
+        List<X509Certificate2> certificates = new List<X509Certificate2>();
+        foreach (PdfSignerCredential cred in credentials)
+        {
+            X509Certificate2 cert = new X509Certificate2(cred.PfxBytes, cred.Password, X509KeyStorageFlags.Exportable);
+            certificates.Add(cert);
+        }
 
         // Step 3: Open the input PDF document from memory
         MemoryStream inMs = new MemoryStream(inputPdfBytes);
@@ -149,8 +203,8 @@ public static class PdfSigner
             width, 
             height);
 
-        // Step 5: Initialize digital signer with the user certificate and attach to document
-        SimpleDigitalSigner signer = new SimpleDigitalSigner(userCert);
+        // Step 5: Initialize multi-signer digital signer with all user certificates and attach to document
+        SimpleDigitalSigner signer = new SimpleDigitalSigner(certificates);
         DigitalSignatureHandler.ForDocument(doc, signer, options);
 
         // Step 6: Save signed PDF document to output memory stream
@@ -162,7 +216,10 @@ public static class PdfSigner
         outMs.Dispose();
         doc.Dispose();
         inMs.Dispose();
-        userCert.Dispose();
+        foreach (X509Certificate2 cert in certificates)
+        {
+            cert.Dispose();
+        }
 
         // Step 8: Return the signed PDF byte array
         return signedPdfBytes;
@@ -217,6 +274,7 @@ public static class PdfSigner
 
     /// <summary>
     /// SERVER-SIDE (IN-MEMORY): Verifies that the signed PDF contains a valid cryptographic signature matching the Database Public Key.
+    /// Supports single-signer and multi-signer co-signed documents (RFC 5652).
     /// </summary>
     public static bool Verify(byte[] signedPdfBytes, byte[] publicKeyBytes)
     {
@@ -259,16 +317,22 @@ public static class PdfSigner
             signedCms.Decode(signatureBytes);
             signedCms.CheckSignature(true);
 
-            // Step 6: Extract signer certificate and verify matching Database Public Key
-            X509Certificate2? signerCert = signedCms.SignerInfos[0].Certificate;
-            if (signerCert == null)
+            // Step 6: Verify matching Database Public Key across all co-signers in the CMS container
+            foreach (SignerInfo signerInfo in signedCms.SignerInfos)
             {
-                return false;
+                X509Certificate2? signerCert = signerInfo.Certificate;
+                if (signerCert != null)
+                {
+                    byte[] pdfPublicKey = signerCert.GetPublicKey();
+                    bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
+                    if (isMatched == true)
+                    {
+                        return true;
+                    }
+                }
             }
 
-            byte[] pdfPublicKey = signerCert.GetPublicKey();
-            bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
-            return isMatched;
+            return false;
         }
         catch
         {
@@ -279,15 +343,20 @@ public static class PdfSigner
     // --- Private Helper Classes ---
 
     /// <summary>
-    /// Helper: Implements PDFsharp's IDigitalSigner interface to generate PKCS#7 / CMS detached signatures.
+    /// Helper: Implements PDFsharp's IDigitalSigner interface to generate PKCS#7 / CMS detached signatures for single or multiple signers.
     /// </summary>
     private class SimpleDigitalSigner : IDigitalSigner
     {
-        private readonly X509Certificate2 _certificate;
+        private readonly IReadOnlyList<X509Certificate2> _certificates;
 
-        public SimpleDigitalSigner(X509Certificate2 certificate)
+        public SimpleDigitalSigner(IReadOnlyList<X509Certificate2> certificates)
         {
-            _certificate = certificate;
+            _certificates = certificates;
+        }
+
+        public SimpleDigitalSigner(X509Certificate2 singleCertificate)
+        {
+            _certificates = new List<X509Certificate2> { singleCertificate };
         }
 
         /// <summary>
@@ -297,12 +366,21 @@ public static class PdfSigner
         {
             get
             {
-                string? commonName = _certificate.GetNameInfo(X509NameType.SimpleName, false);
-                if (string.IsNullOrWhiteSpace(commonName) == true)
+                List<string> names = new List<string>();
+                foreach (X509Certificate2 cert in _certificates)
+                {
+                    string? commonName = cert.GetNameInfo(X509NameType.SimpleName, false);
+                    if (string.IsNullOrWhiteSpace(commonName) == false)
+                    {
+                        names.Add(commonName);
+                    }
+                }
+
+                if (names.Count == 0)
                 {
                     return "Signer";
                 }
-                return commonName;
+                return string.Join(" & ", names);
             }
         }
 
@@ -311,12 +389,13 @@ public static class PdfSigner
         /// </summary>
         public Task<int> GetSignatureSizeAsync()
         {
-            int allocatedSizeInBytes = 4096;
+            int allocatedSizeInBytes = Math.Max(4096, _certificates.Count * 4096);
             return Task.FromResult(allocatedSizeInBytes);
         }
 
         /// <summary>
         /// Calculates the cryptographic PKCS#7 / CMS digital signature for the PDF document content stream.
+        /// Supports embedding multiple co-signers in a single CMS structure (RFC 5652).
         /// </summary>
         public Task<byte[]> GetSignatureAsync(Stream contentStream)
         {
@@ -358,17 +437,18 @@ public static class PdfSigner
             // Step 4: Initialize SignedCms in detached mode (true) so the signature is stored separately
             SignedCms signedCms = new SignedCms(contentInfo, true);
 
-            // Step 5: Configure CMS Signer using the X.509 Certificate and SHA-256 hash algorithm
-            CmsSigner cmsSigner = new CmsSigner(_certificate);
-            cmsSigner.DigestAlgorithm = new Oid("2.16.840.1.101.3.4.2.1", "SHA256");
+            // Step 5: Compute cryptographic digital signatures for ALL co-signers in the container
+            foreach (X509Certificate2 cert in _certificates)
+            {
+                CmsSigner cmsSigner = new CmsSigner(cert);
+                cmsSigner.DigestAlgorithm = new Oid("2.16.840.1.101.3.4.2.1", "SHA256");
+                signedCms.ComputeSignature(cmsSigner);
+            }
 
-            // Step 6: Compute the cryptographic digital signature
-            signedCms.ComputeSignature(cmsSigner);
-
-            // Step 7: Encode the CMS structure into a standard PKCS#7 ASN.1 byte array
+            // Step 6: Encode the multi-signer CMS structure into a standard PKCS#7 ASN.1 byte array
             byte[] pkcs7SignatureBytes = signedCms.Encode();
 
-            // Step 8: Return the signature bytes as an asynchronous Task result
+            // Step 7: Return the signature bytes as an asynchronous Task result
             return Task.FromResult(pkcs7SignatureBytes);
         }
     }

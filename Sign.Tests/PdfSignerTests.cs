@@ -300,13 +300,13 @@ public class PdfSignerTests : IDisposable
     }
 
     [Fact]
-    public void TC_PDF_16_SigningAlreadySignedPdf_ValidatesLatestSignerSuccessfully()
+    public void TC_PDF_16_CoSigning_WithMultipleSignersInSingleCmsContainer_BothSignaturesShouldVerifySuccessfully()
     {
         // Arrange
         byte[] originalPdfBytes = File.ReadAllBytes(_inputPdf);
 
         // User 1: Accountant
-        var (user1Pfx, _) = PdfSigner.GenerateCertificate("Nguyen Van Accountant", _testPassword);
+        var (user1Pfx, user1PublicKey) = PdfSigner.GenerateCertificate("Nguyen Van Accountant", _testPassword);
         
         // User 2: Director
         var (user2Pfx, user2PublicKey) = PdfSigner.GenerateCertificate("Huynh Ba Director", _testPassword);
@@ -314,28 +314,27 @@ public class PdfSignerTests : IDisposable
         // Attacker / Unrelated party
         var (_, attackerPublicKey) = PdfSigner.GenerateCertificate("Attacker Unknown", _testPassword);
 
-        // Act - Step 1: User 1 signs original PDF at bottom-left
-        byte[] signedBy1Bytes = PdfSigner.Sign(
-            originalPdfBytes, 
-            user1Pfx, 
-            _testPassword, 
-            reason: "Accountant Review", 
-            x: 40, y: 40, width: 220, height: 60);
+        var credentials = new System.Collections.Generic.List<PdfSigner.PdfSignerCredential>
+        {
+            new PdfSigner.PdfSignerCredential(user1Pfx, _testPassword),
+            new PdfSigner.PdfSignerCredential(user2Pfx, _testPassword)
+        };
 
-        // Act - Step 2: User 2 signs the PDF
-        byte[] multiSignedBytes = PdfSigner.Sign(
-            signedBy1Bytes, 
-            user2Pfx, 
-            _testPassword, 
-            reason: "Director Approval", 
-            x: 320, y: 40, width: 220, height: 60);
+        // Act: Co-Sign with both credentials in a single CMS container
+        byte[] cosignedBytes = PdfSigner.SignMulti(
+            originalPdfBytes, 
+            credentials, 
+            reason: "Accountant Review & Director Approval", 
+            location: "Ho Chi Minh City, Vietnam");
 
         // Server Verifications
-        bool isUser2Valid = PdfSigner.Verify(multiSignedBytes, user2PublicKey);
-        bool isAttackerValid = PdfSigner.Verify(multiSignedBytes, attackerPublicKey);
+        bool isUser1Valid = PdfSigner.Verify(cosignedBytes, user1PublicKey);
+        bool isUser2Valid = PdfSigner.Verify(cosignedBytes, user2PublicKey);
+        bool isAttackerValid = PdfSigner.Verify(cosignedBytes, attackerPublicKey);
 
-        // Assert
-        Assert.True(isUser2Valid, "User 2's signature must be fully valid on the signed document.");
+        // Assert: Both User 1 and User 2 are valid, Attacker is rejected
+        Assert.True(isUser1Valid, "User 1 (Accountant) signature must verify successfully.");
+        Assert.True(isUser2Valid, "User 2 (Director) signature must verify successfully.");
         Assert.False(isAttackerValid, "Attacker key must not match any valid signature on the document.");
     }
 
