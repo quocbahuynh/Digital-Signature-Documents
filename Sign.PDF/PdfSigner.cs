@@ -1,0 +1,496 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
+using System.Security.Cryptography.X509Certificates;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using PdfSharp.Drawing;
+using PdfSharp.Fonts;
+using PdfSharp.Pdf;
+using PdfSharp.Pdf.IO;
+using PdfSharp.Pdf.Signatures;
+
+public static class PdfSigner
+{
+    // Global font resolver instance registered once for the PDFsharp library
+    private static readonly CustomFontResolver FontResolver = new CustomFontResolver();
+
+    // Static constructor: Executed once when the PdfSigner class is first loaded into memory
+    static PdfSigner()
+    {
+        GlobalFontSettings.FontResolver = FontResolver;
+    }
+
+    /// <summary>
+    /// Configures a custom font file path for PDF signature text annotations.
+    /// </summary>
+    public static void SetFont(string fontPath, string fontName = "CustomFont")
+    {
+        FontResolver.SetFont(fontPath, fontName);
+    }
+
+    /// <summary>
+    /// Generates a self-signed X.509 Digital Certificate: Returns Private Key PFX as raw byte array and Public Key for Database storage.
+    /// Supports plain user name (e.g. "Huynh Ba Quoc") or full X.500 Subject DN (e.g. "CN=Huynh Ba Quoc, O=Company, C=VN").
+    /// Supported key sizes: 1024, 2048 (default), 3072, 4096 bits.
+    /// Expiration: Customizable via validityInDays (default: 365 days / 1 year).
+    /// </summary>
+    public static (byte[] pfxBytes, byte[] publicKeyBytes) GenerateCertificate(
+        string subjectOrUserName, 
+        string password, 
+        int keySizeInBits = 2048,
+        int validityInDays = 365)
+    {
+        // Validate key size: Only allow 1024, 2048, 3072, or 4096 bits
+        if (keySizeInBits != 1024 && keySizeInBits != 2048 && keySizeInBits != 3072 && keySizeInBits != 4096)
+        {
+            throw new ArgumentException(
+                "Invalid RSA key size. Supported key sizes are 1024, 2048, 3072, or 4096 bits.", 
+                nameof(keySizeInBits));
+        }
+
+        // Validate validity period: Must be positive
+        if (validityInDays <= 0)
+        {
+            throw new ArgumentException(
+                "Certificate validity must be greater than 0 days.", 
+                nameof(validityInDays));
+        }
+
+        // Step 1: Initialize RSA key generator with the specified bit size
+        RSA rsa = RSA.Create(keySizeInBits);
+
+        // Step 2: Format Certificate Subject Name (supports plain name or full X.500 DN)
+        string subject;
+        if (subjectOrUserName.Contains("=") == true)
+        {
+            subject = subjectOrUserName;
+        }
+        else
+        {
+            subject = "CN=" + subjectOrUserName;
+        }
+        X500DistinguishedName subjectName = new X500DistinguishedName(subject);
+
+        // Step 3: Create Certificate Request using SHA-256
+        CertificateRequest request = new CertificateRequest(
+            subjectName,
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        // Step 4: Add Digital Signature usage flag
+        X509KeyUsageExtension keyUsage = new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true);
+        request.CertificateExtensions.Add(keyUsage);
+
+        // Step 5: Set certificate validity period (valid for validityInDays starting from yesterday)
+        DateTimeOffset startDate = DateTimeOffset.UtcNow.AddDays(-1);
+        DateTimeOffset endDate = DateTimeOffset.UtcNow.AddDays(validityInDays);
+
+        // Step 6: Create self-signed certificate
+        X509Certificate2 certificate = request.CreateSelfSigned(startDate, endDate);
+
+        // Step 7: Extract Public Key for Database storage
+        byte[] publicKeyBytes = certificate.GetPublicKey();
+
+        // Step 8: Export Private Key PFX protected by password as raw byte array
+        byte[] pfxBytes = certificate.Export(X509ContentType.Pfx, password);
+
+        // Step 9: Dispose cryptographic objects
+        certificate.Dispose();
+        rsa.Dispose();
+
+        // Return generated keypair
+        return (pfxBytes, publicKeyBytes);
+    }
+
+
+    /// <summary>
+    /// CLIENT-SIDE (IN-MEMORY): Signs a PDF byte array directly in RAM using raw PFX byte array.
+    /// Supports custom reason, location, font, page index (0-based, default: last page), and coordinates (X, Y, Width, Height).
+    /// </summary>
+    public static byte[] Sign(
+        byte[] inputPdfBytes, 
+        byte[] pfxBytes, 
+        string password, 
+        string reason = "Approved", 
+        string location = "Ho Chi Minh City", 
+        string? customFontPath = null,
+        int? pageIndex = null,
+        double? x = null,
+        double? y = null,
+        double? width = null,
+        double? height = null)
+    {
+        // Step 1: Configure custom font if provided
+        if (string.IsNullOrWhiteSpace(customFontPath) == false)
+        {
+            SetFont(customFontPath);
+        }
+
+        // Step 2: Load and unlock the X.509 Certificate from PFX bytes using the password (cross-platform compatible)
+        X509Certificate2 userCert = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
+
+        // Step 3: Open the input PDF document from memory
+        MemoryStream inMs = new MemoryStream(inputPdfBytes);
+        PdfDocument doc = PdfReader.Open(inMs, PdfDocumentOpenMode.Modify);
+
+        // Step 4: Configure visible signature options and coordinates
+        DigitalSignatureOptions options = ConfigureVisibleSignatureOptions(
+            doc.PageCount, 
+            reason, 
+            location, 
+            pageIndex, 
+            x, 
+            y, 
+            width, 
+            height);
+
+        // Step 5: Initialize digital signer with the user certificate and attach to document
+        SimpleDigitalSigner signer = new SimpleDigitalSigner(userCert);
+        DigitalSignatureHandler.ForDocument(doc, signer, options);
+
+        // Step 6: Save signed PDF document to output memory stream
+        MemoryStream outMs = new MemoryStream();
+        doc.Save(outMs);
+        byte[] signedPdfBytes = outMs.ToArray();
+
+        // Step 7: Dispose memory streams, document, and cryptographic objects
+        outMs.Dispose();
+        doc.Dispose();
+        inMs.Dispose();
+        userCert.Dispose();
+
+        // Step 8: Return the signed PDF byte array
+        return signedPdfBytes;
+    }
+
+    /// <summary>
+    /// Helper: Configures visible digital signature options including target page validation and visual rectangle coordinates.
+    /// </summary>
+    private static DigitalSignatureOptions ConfigureVisibleSignatureOptions(
+        int totalPageCount,
+        string reason,
+        string location,
+        int? pageIndex,
+        double? x,
+        double? y,
+        double? width,
+        double? height)
+    {
+        // 1. Determine target page index (default: last page)
+        int targetPageIndex;
+        if (pageIndex.HasValue == true)
+        {
+            if (pageIndex.Value < 0 || pageIndex.Value >= totalPageCount)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(pageIndex),
+                    $"Page index {pageIndex.Value} is out of range. Document has {totalPageCount} pages (0 to {totalPageCount - 1}).");
+            }
+            targetPageIndex = pageIndex.Value;
+        }
+        else
+        {
+            targetPageIndex = totalPageCount - 1;
+        }
+
+        // 2. Configure visual signature coordinates (default: bottom-right box)
+        double sigX = x.HasValue ? x.Value : 310;
+        double sigY = y.HasValue ? y.Value : 40;
+        double sigWidth = width.HasValue ? width.Value : 260;
+        double sigHeight = height.HasValue ? height.Value : 60;
+        XRect signatureRectangle = new XRect(sigX, sigY, sigWidth, sigHeight);
+
+        // 3. Construct DigitalSignatureOptions
+        return new DigitalSignatureOptions
+        {
+            Reason = reason,
+            Location = location,
+            Rectangle = signatureRectangle,
+            PageIndex = targetPageIndex
+        };
+    }
+
+    /// <summary>
+    /// SERVER-SIDE (IN-MEMORY): Verifies that the signed PDF contains a valid cryptographic signature matching the Database Public Key.
+    /// Supports multi-signature PDFs signed by multiple parties.
+    /// </summary>
+    public static bool Verify(byte[] signedPdfBytes, byte[] publicKeyBytes)
+    {
+        string pdfText = System.Text.Encoding.ASCII.GetString(signedPdfBytes);
+
+        // Step 1: Extract all digital signature blocks (/ByteRange + /Contents)
+        List<PdfSignatureBlock> signatureBlocks = ExtractAllSignatureBlocks(signedPdfBytes, pdfText);
+        if (signatureBlocks.Count == 0)
+        {
+            return false;
+        }
+
+        // Step 2: Iterate through all signatures to find a valid match for the requested Public Key
+        foreach (PdfSignatureBlock block in signatureBlocks)
+        {
+            try
+            {
+                // Step 2.1: Verify cryptographic integrity (detect tampering)
+                ContentInfo contentInfo = new ContentInfo(block.SignedBytes);
+                SignedCms signedCms = new SignedCms(contentInfo, true);
+                signedCms.Decode(block.SignatureBytes);
+                signedCms.CheckSignature(true);
+
+                // Step 2.2: Extract signer certificate and public key
+                X509Certificate2? signerCert = signedCms.SignerInfos[0].Certificate;
+                if (signerCert != null)
+                {
+                    byte[] pdfPublicKey = signerCert.GetPublicKey();
+                    bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
+                    if (isMatched == true)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                // Continue checking remaining signatures if this one failed
+                continue;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Helper record containing raw signed content bytes and its corresponding PKCS#7 signature bytes.
+    /// </summary>
+    private class PdfSignatureBlock
+    {
+        public byte[] SignedBytes { get; }
+        public byte[] SignatureBytes { get; }
+
+        public PdfSignatureBlock(byte[] signedBytes, byte[] signatureBytes)
+        {
+            SignedBytes = signedBytes;
+            SignatureBytes = signatureBytes;
+        }
+    }
+
+    /// <summary>
+    /// Locates all digital signatures in the PDF by pairing /ByteRange and /Contents entries.
+    /// </summary>
+    private static List<PdfSignatureBlock> ExtractAllSignatureBlocks(byte[] pdfBytes, string pdfText)
+    {
+        List<PdfSignatureBlock> signatureBlocks = new List<PdfSignatureBlock>();
+
+        MatchCollection byteRangeMatches = Regex.Matches(pdfText, @"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]");
+        MatchCollection contentsMatches = Regex.Matches(pdfText, @"/Contents\s*<([0-9A-Fa-f]+)>");
+
+        int count = Math.Min(byteRangeMatches.Count, contentsMatches.Count);
+        for (int i = 0; i < count; i++)
+        {
+            Match byteRangeMatch = byteRangeMatches[i];
+            Match contentsMatch = contentsMatches[i];
+
+            int offset1 = int.Parse(byteRangeMatch.Groups[1].Value);
+            int length1 = int.Parse(byteRangeMatch.Groups[2].Value);
+            int offset2 = int.Parse(byteRangeMatch.Groups[3].Value);
+            int length2 = int.Parse(byteRangeMatch.Groups[4].Value);
+
+            if (offset1 + length1 <= pdfBytes.Length && offset2 + length2 <= pdfBytes.Length)
+            {
+                byte[] signedBytes = new byte[length1 + length2];
+                Buffer.BlockCopy(pdfBytes, offset1, signedBytes, 0, length1);
+                Buffer.BlockCopy(pdfBytes, offset2, signedBytes, length1, length2);
+
+                string hexContent = contentsMatch.Groups[1].Value;
+                byte[] signatureBytes = Convert.FromHexString(hexContent);
+
+                PdfSignatureBlock block = new PdfSignatureBlock(signedBytes, signatureBytes);
+                signatureBlocks.Add(block);
+            }
+        }
+
+        return signatureBlocks;
+    }
+
+    // --- Private Helper Classes ---
+
+    /// <summary>
+    /// Helper: Implements PDFsharp's IDigitalSigner interface to generate PKCS#7 / CMS detached signatures.
+    /// </summary>
+    private class SimpleDigitalSigner : IDigitalSigner
+    {
+        private readonly X509Certificate2 _certificate;
+
+        public SimpleDigitalSigner(X509Certificate2 certificate)
+        {
+            _certificate = certificate;
+        }
+
+        /// <summary>
+        /// Gets the certificate display name for the signature field annotation.
+        /// </summary>
+        public string CertificateName
+        {
+            get
+            {
+                string? commonName = _certificate.GetNameInfo(X509NameType.SimpleName, false);
+                if (string.IsNullOrWhiteSpace(commonName) == true)
+                {
+                    return "Signer";
+                }
+                return commonName;
+            }
+        }
+
+        /// <summary>
+        /// Returns the estimated maximum byte size allocated for the digital signature in the PDF structure.
+        /// </summary>
+        public Task<int> GetSignatureSizeAsync()
+        {
+            int allocatedSizeInBytes = 4096;
+            return Task.FromResult(allocatedSizeInBytes);
+        }
+
+        /// <summary>
+        /// Calculates the cryptographic PKCS#7 / CMS digital signature for the PDF document content stream.
+        /// </summary>
+        public Task<byte[]> GetSignatureAsync(Stream contentStream)
+        {
+            // Step 1: Ensure the underlying stream position is at the beginning (0)
+            PropertyInfo? streamProperty = contentStream.GetType().GetProperty(
+                "Stream", 
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            if (streamProperty != null)
+            {
+                object? propertyValue = streamProperty.GetValue(contentStream);
+                if (propertyValue is Stream internalStream)
+                {
+                    try
+                    {
+                        internalStream.Position = 0;
+                    }
+                    catch
+                    {
+                        // Ignore if internal stream does not support position setting
+                    }
+                }
+            }
+
+            // Step 2: Read raw document content bytes using a standard buffer loop (compatible with RangedStream)
+            MemoryStream memoryStream = new MemoryStream();
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = contentStream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                memoryStream.Write(buffer, 0, bytesRead);
+            }
+            byte[] documentBytes = memoryStream.ToArray();
+            memoryStream.Dispose();
+
+            // Step 3: Package raw document bytes into a CMS ContentInfo structure
+            ContentInfo contentInfo = new ContentInfo(documentBytes);
+
+            // Step 4: Initialize SignedCms in detached mode (true) so the signature is stored separately
+            SignedCms signedCms = new SignedCms(contentInfo, true);
+
+            // Step 5: Configure CMS Signer using the X.509 Certificate and SHA-256 hash algorithm
+            CmsSigner cmsSigner = new CmsSigner(_certificate);
+            cmsSigner.DigestAlgorithm = new Oid("2.16.840.1.101.3.4.2.1", "SHA256");
+
+            // Step 6: Compute the cryptographic digital signature
+            signedCms.ComputeSignature(cmsSigner);
+
+            // Step 7: Encode the CMS structure into a standard PKCS#7 ASN.1 byte array
+            byte[] pkcs7SignatureBytes = signedCms.Encode();
+
+            // Step 8: Return the signature bytes as an asynchronous Task result
+            return Task.FromResult(pkcs7SignatureBytes);
+        }
+    }
+
+    private class CustomFontResolver : IFontResolver
+    {
+        private string _fontName = "Verdana";
+        private string? _customFontPath = null;
+
+        public void SetFont(string fontPath, string fontName = "CustomFont")
+        {
+            string? resolvedPath = ResolveFontPath(fontPath);
+            if (resolvedPath == null)
+            {
+                throw new FileNotFoundException($"Custom font file not found at: '{fontPath}'");
+            }
+            _customFontPath = resolvedPath;
+            _fontName = fontName;
+        }
+
+        public FontResolverInfo? ResolveTypeface(string familyName, bool isBold, bool isItalic)
+        {
+            return new FontResolverInfo(_fontName);
+        }
+
+        public byte[]? GetFont(string faceName)
+        {
+            // 1. If user configured a custom font file path
+            if (string.IsNullOrEmpty(_customFontPath) == false)
+            {
+                string? resolvedPath = ResolveFontPath(_customFontPath);
+                if (resolvedPath != null)
+                {
+                    return File.ReadAllBytes(resolvedPath);
+                }
+            }
+
+            // 2. Default fallback: Load from application folder ./Fonts/Verdana.ttf
+            string defaultPath = Path.Combine(AppContext.BaseDirectory, "Fonts", "Verdana.ttf");
+            string? resolvedDefaultPath = ResolveFontPath(defaultPath);
+            if (resolvedDefaultPath != null)
+            {
+                return File.ReadAllBytes(resolvedDefaultPath);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Normalizes path separators (\ and /) and resolves cross-platform paths for Windows, Linux, and macOS.
+        /// </summary>
+        private static string? ResolveFontPath(string fontPath)
+        {
+            if (string.IsNullOrWhiteSpace(fontPath) == true)
+            {
+                return null;
+            }
+
+            // Step 1: Check raw path as provided
+            if (File.Exists(fontPath) == true)
+            {
+                return fontPath;
+            }
+
+            // Step 2: Normalize directory separators (\ and /) for the current operating system
+            string normalizedPath = fontPath
+                .Replace('\\', Path.DirectorySeparatorChar)
+                .Replace('/', Path.DirectorySeparatorChar);
+
+            if (File.Exists(normalizedPath) == true)
+            {
+                return normalizedPath;
+            }
+
+            // Step 3: Check relative to application binary directory (AppContext.BaseDirectory)
+            string appBasePath = Path.Combine(AppContext.BaseDirectory, normalizedPath);
+            if (File.Exists(appBasePath) == true)
+            {
+                return appBasePath;
+            }
+
+            return null;
+        }
+    }
+}

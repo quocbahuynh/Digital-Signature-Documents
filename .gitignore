@@ -1,0 +1,18 @@
+# Build outputs
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+
+# System / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime test outputs
+*.pfx
+**/*.pfx
+*signed*
+*hacked*
+*tampered*
