@@ -646,4 +646,40 @@ public class PdfSignerTests : IDisposable
         Assert.False(verifyImpostor3, "Impostor 3 must fail verification.");
         Assert.False(verifyImpostor4, "Impostor 4 must fail verification.");
     }
+
+    [Fact]
+    public void TC_PDF_35_SignDataAndVerifyData_SequentialWorkflow_BothSignersShouldVerifySuccessfully()
+    {
+        // Arrange
+        byte[] originalPdfBytes = File.ReadAllBytes(_inputPdf);
+
+        // Step 1: User 1 creates cert and signs detached
+        var (user1Pfx, user1PublicKey) = PdfSigner.GenerateCertificate("Nguyen Van Accountant", _testPassword);
+        byte[] user1Signature = PdfSigner.SignData(originalPdfBytes, user1Pfx, _testPassword);
+
+        // Step 2: User 2 creates cert and signs detached
+        var (user2Pfx, user2PublicKey) = PdfSigner.GenerateCertificate("Huynh Ba Director", _testPassword);
+        byte[] user2Signature = PdfSigner.SignData(originalPdfBytes, user2Pfx, _testPassword);
+
+        // Impostor key
+        var (_, attackerPublicKey) = PdfSigner.GenerateCertificate("Attacker Unknown", _testPassword);
+
+        // Act & Assert 1: Verify User 1 signature on original data
+        bool isUser1Valid = PdfSigner.VerifyData(originalPdfBytes, user1Signature, user1PublicKey);
+        Assert.True(isUser1Valid, "User 1 detached signature must verify successfully.");
+
+        // Act & Assert 2: Verify User 2 signature on original data
+        bool isUser2Valid = PdfSigner.VerifyData(originalPdfBytes, user2Signature, user2PublicKey);
+        Assert.True(isUser2Valid, "User 2 detached signature must verify successfully.");
+
+        // Act & Assert 3: Reject attacker public key
+        bool isAttackerValid = PdfSigner.VerifyData(originalPdfBytes, user1Signature, attackerPublicKey);
+        Assert.False(isAttackerValid, "Attacker key must fail verification.");
+
+        // Act & Assert 4: Reject tampered document bytes
+        byte[] tamperedBytes = (byte[])originalPdfBytes.Clone();
+        tamperedBytes[0] ^= 0xFF;
+        bool isTamperedValid = PdfSigner.VerifyData(tamperedBytes, user1Signature, user1PublicKey);
+        Assert.False(isTamperedValid, "Tampered data must fail verification.");
+    }
 }

@@ -340,6 +340,80 @@ public static class PdfSigner
         }
     }
 
+    /// <summary>
+    /// CLIENT-SIDE (IN-MEMORY): Generates a standalone detached PKCS#7 / CMS digital signature for arbitrary data (file/bytes) in RAM.
+    /// Does not modify or embed into the original data, ideal for multi-step approval workflows stored in database.
+    /// </summary>
+    public static byte[] SignData(byte[] dataBytes, byte[] pfxBytes, string password)
+    {
+        // Step 1: Load and unlock the X.509 Certificate from PFX bytes using the password (cross-platform compatible)
+        X509Certificate2 userCert = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
+
+        // Step 2: Package raw data bytes into a CMS ContentInfo structure
+        ContentInfo contentInfo = new ContentInfo(dataBytes);
+
+        // Step 3: Initialize SignedCms in detached mode (true)
+        SignedCms signedCms = new SignedCms(contentInfo, true);
+
+        // Step 4: Configure CMS Signer using the X.509 Certificate and SHA-256 hash algorithm
+        CmsSigner cmsSigner = new CmsSigner(userCert);
+        cmsSigner.DigestAlgorithm = new Oid("2.16.840.1.101.3.4.2.1", "SHA256");
+
+        // Step 5: Compute the cryptographic digital signature
+        signedCms.ComputeSignature(cmsSigner);
+
+        // Step 6: Encode the CMS structure into a standard PKCS#7 ASN.1 byte array
+        byte[] signatureBytes = signedCms.Encode();
+
+        // Step 7: Dispose cryptographic objects
+        userCert.Dispose();
+
+        // Step 8: Return the detached PKCS#7 signature byte array
+        return signatureBytes;
+    }
+
+    /// <summary>
+    /// SERVER-SIDE (IN-MEMORY): Verifies a standalone detached PKCS#7 / CMS digital signature against the original data and Database Public Key.
+    /// </summary>
+    public static bool VerifyData(byte[] dataBytes, byte[] signatureBytes, byte[] publicKeyBytes)
+    {
+        try
+        {
+            // Step 1: Package raw data bytes into a CMS ContentInfo structure
+            ContentInfo contentInfo = new ContentInfo(dataBytes);
+
+            // Step 2: Initialize SignedCms in detached mode (true)
+            SignedCms signedCms = new SignedCms(contentInfo, true);
+
+            // Step 3: Decode detached PKCS#7 signature bytes
+            signedCms.Decode(signatureBytes);
+
+            // Step 4: Verify cryptographic integrity (detect data or signature tampering)
+            signedCms.CheckSignature(true);
+
+            // Step 5: Verify matching Database Public Key across signers
+            foreach (SignerInfo signerInfo in signedCms.SignerInfos)
+            {
+                X509Certificate2? signerCert = signerInfo.Certificate;
+                if (signerCert != null)
+                {
+                    byte[] pdfPublicKey = signerCert.GetPublicKey();
+                    bool isMatched = pdfPublicKey.SequenceEqual(publicKeyBytes);
+                    if (isMatched == true)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     // --- Private Helper Classes ---
 
     /// <summary>
