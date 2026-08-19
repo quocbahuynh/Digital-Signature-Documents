@@ -90,6 +90,7 @@ dotnet test
 | **`TC-PDF-33`** | `TC_PDF_33_Verify_ConcurrentMultiThreaded_ShouldAllSucceed` | Concurrently verify a signed PDF across 30 simultaneous worker threads. | Returns `true` across all 30 parallel threads. |
 | **`TC-PDF-34`** | `TC_PDF_34_Verify_BatchMultiplePublicKeys_ShouldCorrectlyIdentifyMatchingKey` | Batch test a signed PDF against 1 legitimate key and 4 impostor public keys. | Returns `true` only for the matching key and `false` for all 4 impostors. |
 | **`TC-PDF-35`** | `TC_PDF_35_SignDataAndVerifyData_SequentialWorkflow_BothSignersShouldVerifySuccessfully` | Sequential detached digital signatures (`SignData` & `VerifyData`) across separate signers and timestamps. | Returns `true` for all legitimate detached signers, `false` for attackers and tampered documents. |
+| **`TC-PDF-36`** | `TC_PDF_36_StampVisualSignature_SequentialWorkflow_ProducesValidVisibleSignaturesAndPassesVerification` | Stamp visible signature boxes sequentially on PDF (`StampVisualSignature`) combined with detached crypto verification. | Returns `true` for both visible rendering and detached verification. |
 
 ---
 

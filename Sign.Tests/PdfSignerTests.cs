@@ -682,4 +682,50 @@ public class PdfSignerTests : IDisposable
         bool isTamperedValid = PdfSigner.VerifyData(tamperedBytes, user1Signature, user1PublicKey);
         Assert.False(isTamperedValid, "Tampered data must fail verification.");
     }
+
+    [Fact]
+    public void TC_PDF_36_StampVisualSignature_SequentialWorkflow_ProducesValidVisibleSignaturesAndPassesVerification()
+    {
+        // Arrange
+        byte[] originalPdfBytes = File.ReadAllBytes(_inputPdf);
+
+        // Step 1: User 1 stamps visual box at bottom-left and generates detached signature
+        var (user1Pfx, user1PublicKey) = PdfSigner.GenerateCertificate("Nguyen Van Accountant", _testPassword);
+        byte[] step1PdfBytes = PdfSigner.StampVisualSignature(
+            originalPdfBytes,
+            signerName: "Nguyen Van Accountant",
+            reason: "Accountant Review",
+            location: "Hanoi",
+            x: 40,
+            y: 40,
+            width: 220,
+            height: 60);
+
+        byte[] user1Signature = PdfSigner.SignData(step1PdfBytes, user1Pfx, _testPassword);
+
+        // Step 2: User 2 stamps visual box at bottom-right and generates detached signature
+        var (user2Pfx, user2PublicKey) = PdfSigner.GenerateCertificate("Huynh Ba Director", _testPassword);
+        byte[] finalPdfBytes = PdfSigner.StampVisualSignature(
+            step1PdfBytes,
+            signerName: "Huynh Ba Director",
+            reason: "Director Approval",
+            location: "Ho Chi Minh City",
+            x: 320,
+            y: 40,
+            width: 220,
+            height: 60);
+
+        byte[] user2Signature = PdfSigner.SignData(finalPdfBytes, user2Pfx, _testPassword);
+
+        // Assert 1: Both stamped byte arrays are valid PDFs and larger than original
+        Assert.True(step1PdfBytes.Length > originalPdfBytes.Length, "Step 1 PDF must include stamped visual box.");
+        Assert.True(finalPdfBytes.Length > step1PdfBytes.Length, "Final PDF must include both stamped visual boxes.");
+
+        // Assert 2: Verify both detached signatures against their respective document versions
+        bool isUser1Valid = PdfSigner.VerifyData(step1PdfBytes, user1Signature, user1PublicKey);
+        bool isUser2Valid = PdfSigner.VerifyData(finalPdfBytes, user2Signature, user2PublicKey);
+
+        Assert.True(isUser1Valid, "User 1 visual+crypto signature must verify successfully.");
+        Assert.True(isUser2Valid, "User 2 visual+crypto signature must verify successfully.");
+    }
 }

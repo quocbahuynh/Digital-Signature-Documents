@@ -107,6 +107,93 @@ public static class PdfSigner
         return (pfxBytes, publicKeyBytes);
     }
 
+    /// <summary>
+    /// CLIENT-SIDE / SERVER-SIDE (IN-MEMORY): Stamps a visible signature box onto a PDF page in RAM without modifying cryptographic signature structures.
+    /// Ideal for stamping visual approval boxes incrementally during multi-signer workflows before generating detached cryptographic signatures.
+    /// </summary>
+    public static byte[] StampVisualSignature(
+        byte[] inputPdfBytes,
+        string signerName,
+        string reason = "Approved",
+        string location = "Ho Chi Minh City",
+        DateTime? signedAt = null,
+        int? pageIndex = null,
+        double? x = null,
+        double? y = null,
+        double? width = null,
+        double? height = null,
+        string? customFontPath = null)
+    {
+        // Step 1: Configure custom font if provided
+        if (string.IsNullOrWhiteSpace(customFontPath) == false)
+        {
+            SetFont(customFontPath);
+        }
+
+        // Step 2: Open input PDF document from memory stream in Modify mode
+        MemoryStream inMs = new MemoryStream(inputPdfBytes);
+        PdfDocument doc = PdfReader.Open(inMs, PdfDocumentOpenMode.Modify);
+
+        // Step 3: Determine target page (default: last page)
+        int targetPageIndex;
+        if (pageIndex.HasValue == true)
+        {
+            if (pageIndex.Value < 0 || pageIndex.Value >= doc.PageCount)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(pageIndex),
+                    $"Page index {pageIndex.Value} is out of range. Document has {doc.PageCount} pages (0 to {doc.PageCount - 1}).");
+            }
+            targetPageIndex = pageIndex.Value;
+        }
+        else
+        {
+            targetPageIndex = doc.PageCount - 1;
+        }
+
+        PdfPage page = doc.Pages[targetPageIndex];
+
+        // Step 4: Calculate visual box coordinates (converts bottom-left PDF offset to top-left XGraphics coordinate)
+        double boxX = x.HasValue ? x.Value : 310;
+        double defaultHeight = height.HasValue ? height.Value : 60;
+        double defaultWidth = width.HasValue ? width.Value : 230;
+        double boxY = y.HasValue 
+            ? (page.Height.Point - y.Value - defaultHeight) 
+            : (page.Height.Point - 100);
+
+        DateTime date = signedAt.HasValue ? signedAt.Value : DateTime.Now;
+
+        // Step 5: Render visible signature box onto the page using XGraphics
+        using (XGraphics gfx = XGraphics.FromPdfPage(page))
+        {
+            string fontName = FontResolver.CurrentFontName;
+            XFont fontRegular = new XFont(fontName, 7.5, XFontStyleEx.Regular);
+            XFont fontBold = new XFont(fontName, 7.5, XFontStyleEx.Bold);
+            XBrush textBrush = XBrushes.Black;
+
+            double currentY = boxY + 12;
+            gfx.DrawString($"Signed by: {signerName}", fontBold, textBrush, new XPoint(boxX, currentY));
+            currentY += 12;
+            gfx.DrawString($"Location: {location}", fontRegular, textBrush, new XPoint(boxX, currentY));
+            currentY += 12;
+            gfx.DrawString($"Reason: {reason}", fontRegular, textBrush, new XPoint(boxX, currentY));
+            currentY += 12;
+            gfx.DrawString($"Date: {date:dd/MM/yyyy HH:mm:ss}", fontRegular, textBrush, new XPoint(boxX, currentY));
+        }
+
+        // Step 6: Save stamped PDF document to memory stream
+        MemoryStream outMs = new MemoryStream();
+        doc.Save(outMs);
+        byte[] stampedPdfBytes = outMs.ToArray();
+
+        // Step 7: Dispose memory streams and document
+        outMs.Dispose();
+        doc.Dispose();
+        inMs.Dispose();
+
+        // Step 8: Return stamped PDF byte array
+        return stampedPdfBytes;
+    }
 
     /// <summary>
     /// Represents a signer credential (PFX private key bytes + password) for co-signing documents.
@@ -531,6 +618,14 @@ public static class PdfSigner
     {
         private string _fontName = "Verdana";
         private string? _customFontPath = null;
+
+        public string CurrentFontName
+        {
+            get
+            {
+                return _fontName;
+            }
+        }
 
         public void SetFont(string fontPath, string fontName = "CustomFont")
         {
