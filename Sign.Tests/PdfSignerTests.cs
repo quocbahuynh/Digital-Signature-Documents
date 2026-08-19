@@ -462,7 +462,7 @@ public class PdfSignerTests : IDisposable
         // Arrange
         byte[] originalBytes = File.ReadAllBytes(_inputPdf);
 
-        // Step 1: User 1 (Accountant) stamps visual box at bottom-left and signs
+        // Step 1: User 1 (Accountant) stamps visual box at bottom-left
         var (user1Pfx, user1PublicKey) = PdfSigner.GenerateCertificate("Nguyen Van Accountant", _testPassword);
         byte[] step1PdfBytes = PdfSigner.StampVisualSignature(
             originalBytes,
@@ -474,9 +474,7 @@ public class PdfSignerTests : IDisposable
             width: 220,
             height: 60);
 
-        byte[] user1Signature = PdfSigner.SignData(step1PdfBytes, user1Pfx, _testPassword);
-
-        // Step 2: User 2 (Director) stamps visual box at bottom-right and signs
+        // Step 2: User 2 (Director) stamps visual box at bottom-right
         var (user2Pfx, user2PublicKey) = PdfSigner.GenerateCertificate("Huynh Ba Director", _testPassword);
         byte[] finalPdfBytes = PdfSigner.StampVisualSignature(
             step1PdfBytes,
@@ -488,14 +486,16 @@ public class PdfSignerTests : IDisposable
             width: 220,
             height: 60);
 
+        // Step 3: Both users sign the final document
+        byte[] user1Signature = PdfSigner.SignData(finalPdfBytes, user1Pfx, _testPassword);
         byte[] user2Signature = PdfSigner.SignData(finalPdfBytes, user2Pfx, _testPassword);
 
-        // Assert: Detached cryptographic verification for both users
-        bool isUser1Valid = PdfSigner.VerifyData(step1PdfBytes, user1Signature, user1PublicKey);
+        // Assert: Detached cryptographic verification for both users on the final PDF
+        bool isUser1Valid = PdfSigner.VerifyData(finalPdfBytes, user1Signature, user1PublicKey);
         bool isUser2Valid = PdfSigner.VerifyData(finalPdfBytes, user2Signature, user2PublicKey);
 
-        Assert.True(isUser1Valid, "User 1 (Accountant) visual+crypto signature must verify successfully.");
-        Assert.True(isUser2Valid, "User 2 (Director) visual+crypto signature must verify successfully.");
+        Assert.True(isUser1Valid, "User 1 (Accountant) must verify on the final PDF.");
+        Assert.True(isUser2Valid, "User 2 (Director) must verify on the final PDF.");
 
         // Assert: Attacker rejection
         var (_, attackerPublicKey) = PdfSigner.GenerateCertificate("Attacker", _testPassword);
